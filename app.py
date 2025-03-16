@@ -5,6 +5,7 @@ import cv2
 import numpy as np
 from torchvision import transforms
 from PIL import Image
+from streamlit_webrtc import webrtc_streamer, VideoTransformerBase
 
 # Load trained model
 class Generator(nn.Module):
@@ -27,8 +28,15 @@ class Generator(nn.Module):
 # Load Generator model
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 generator = Generator().to(DEVICE)
-generator.load_state_dict(torch.load("generator_g.pth", map_location=DEVICE))
-generator.eval()
+
+# Ensure correct model loading
+try:
+    state_dict = torch.load("generator_g.pth", map_location=DEVICE)
+    generator.load_state_dict(state_dict)
+    generator.eval()
+except RuntimeError as e:
+    st.error(f"Model loading error: {e}")
+    st.stop()
 
 # Define image transformation
 transform = transforms.Compose([
@@ -39,7 +47,7 @@ transform = transforms.Compose([
 
 # Function to process a frame
 def transform_frame(frame):
-    img = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))  # Convert to PIL Image
+    img = Image.fromarray(frame)  # Convert to PIL Image
     img = transform(img).unsqueeze(0).to(DEVICE)  # Apply transformations
     with torch.no_grad():
         output = generator(img)  # Run model
@@ -48,37 +56,31 @@ def transform_frame(frame):
     output = (output * 255).astype(np.uint8)  # Convert to uint8
     return output
 
-# Streamlit App
+# WebRTC Video Processing for Streamlit Cloud
+class VideoTransformer(VideoTransformerBase):
+    def transform(self, frame):
+        img = frame.to_ndarray(format="bgr24")  # Convert to NumPy array
+        img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)  # Convert to RGB
+        transformed = transform_frame(img_rgb)  # Apply model
+        
+        # Resize to ensure both frames are the same height
+        h, w, _ = img.shape
+        transformed = cv2.resize(transformed, (w, h))
+
+        # Stack images side by side (original on left, transformed on right)
+        stacked_frame = np.hstack((img_rgb, transformed))
+        
+        return cv2.cvtColor(stacked_frame, cv2.COLOR_RGB2BGR)  # Convert back to BGR for OpenCV
+
+# Streamlit UI
 st.title("Live Video Transformation using CycleGAN")
 st.sidebar.header("Settings")
 
-# Select camera
-camera_source = st.sidebar.selectbox("Select Camera", ["Default Camera"], index=0)
+st.write("### Original (Left) | Transformed (Right)")
 
-# Start video capture
-cap = cv2.VideoCapture(0)  # 0 is default webcam
-frame_placeholder = st.empty()  # Placeholder for video frames
-
-st.sidebar.write("Press **Q** in the video window to stop.")
-
-while cap.isOpened():
-    ret, frame = cap.read()
-    if not ret:
-        st.sidebar.write("Error: Unable to access camera")
-        break
-
-    frame_resized = cv2.resize(frame, (256, 256))  # Resize original frame
-    transformed_frame = transform_frame(frame_resized)  # Apply model
-
-    # Stack resized original and transformed images side-by-side
-    stacked_frame = np.hstack((cv2.cvtColor(frame_resized, cv2.COLOR_BGR2RGB), transformed_frame))
-
-    frame_placeholder.image(stacked_frame, channels="RGB", use_column_width=True)
-
-    # Stop when 'q' is pressed
-    if cv2.waitKey(1) & 0xFF == ord('q'):
-        break
-
-
-cap.release()
-cv2.destroyAllWindows()
+# WebRTC Streaming
+webrtc_streamer(
+    key="video",
+    video_transformer_factory=VideoTransformer,
+    async_transform=True,
+)
