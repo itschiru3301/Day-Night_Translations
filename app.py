@@ -4,15 +4,14 @@ import streamlit as st
 import torch
 import torch.nn as nn
 import cv2
+import torch.classes
 import numpy as np
 from torchvision import transforms
 from PIL import Image
 from streamlit_webrtc import webrtc_streamer, VideoTransformerBase
 
 # Ensure an event loop is running
-try:
-    asyncio.get_running_loop()
-except RuntimeError:
+if not asyncio.get_event_loop().is_running():
     asyncio.set_event_loop(asyncio.new_event_loop())
 
 # Set environment variable for Streamlit
