@@ -4,7 +4,7 @@ import streamlit as st
 import torch
 import torch.nn as nn
 import cv2
-import torch.classes
+
 import numpy as np
 from torchvision import transforms
 from PIL import Image
