@@ -1,3 +1,6 @@
+import os
+os.environ["STREAMLIT_RUN_ONCE"] = "True"
+
 import streamlit as st
 import torch
 import torch.nn as nn
