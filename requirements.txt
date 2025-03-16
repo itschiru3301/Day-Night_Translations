@@ -5,3 +5,11 @@ opencv-python
 streamlit
 pillow
 streamlit-webrtc
+
+streamlit
+torch
+torchvision
+opencv-python-headless
+numpy
+Pillow
+streamlit-webrtc
