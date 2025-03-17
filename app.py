@@ -1,23 +1,23 @@
-import os
-import asyncio
 import streamlit as st
 import torch
-import torch.nn as nn
 import cv2
-
 import numpy as np
-from torchvision import transforms
 from PIL import Image
-from streamlit_webrtc import webrtc_streamer, VideoTransformerBase
+from torchvision import transforms
+from torch import nn
 
-# Ensure an event loop is running
-if not asyncio.get_event_loop().is_running():
-    asyncio.set_event_loop(asyncio.new_event_loop())
+# Streamlit App Title
+st.title("🌙 CycleGAN Real-Time Video Transformation")
+st.markdown("Convert day-to-night or night-to-day in real-time using your webcam! 🚀")
 
-# Set environment variable for Streamlit
-os.environ["STREAMLIT_RUN_ONCE"] = "True"
+# Sidebar Settings
+st.sidebar.header("Settings")
+transform_type = st.sidebar.radio("Select Transformation", ("Day to Night", "Night to Day"))
 
-# Define the Generator model
+# Device Configuration
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# Model Definition (Must Match Training)
 class Generator(nn.Module):
     def __init__(self):
         super(Generator, self).__init__()
@@ -35,55 +35,69 @@ class Generator(nn.Module):
     def forward(self, x):
         return self.main(x)
 
-# Load the model
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-generator = Generator().to(DEVICE)
+# Load Model with Caching
+@st.cache_resource
+def load_generator(model_path):
+    model = Generator().to(DEVICE)
+    model.load_state_dict(torch.load(model_path, map_location=DEVICE))
+    model.eval()
+    return model
 
+# Ensure model files exist before loading
 try:
-    state_dict = torch.load("generator_g.pth", map_location=DEVICE)
-    generator.load_state_dict(state_dict)
-    generator.eval()
+    generator_g = load_generator("generator_g.pth")  # Day to Night
+    generator_f = load_generator("generator_f.pth")  # Night to Day
 except Exception as e:
-    st.error(f"Failed to load model: {e}")
+    st.error(f"Error loading models: {e}")
     st.stop()
 
-# Define image transformations
+# Image Processing Functions
 transform = transforms.Compose([
     transforms.Resize((256, 256)),
     transforms.ToTensor(),
     transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
 ])
 
-def transform_frame(frame):
-    """Processes a frame through the model."""
-    img = Image.fromarray(frame)
-    img = transform(img).unsqueeze(0).to(DEVICE)
+def preprocess_frame(image):
+    """Convert image to model-compatible tensor."""
+    return transform(image).unsqueeze(0).to(DEVICE)
+
+def postprocess_frame(tensor):
+    """Convert model output tensor back to image."""
+    tensor = tensor.squeeze(0).detach().cpu().numpy()
+    tensor = (tensor * 0.5 + 0.5) * 255  # Reverse normalization
+    tensor = np.clip(tensor, 0, 255).astype(np.uint8)
+    return Image.fromarray(np.transpose(tensor, (1, 2, 0)))
+
+# Webcam Setup
+FRAME_WINDOW = st.image([])
+cap = cv2.VideoCapture(0)
+
+if not cap.isOpened():
+    st.error("⚠️ Cannot access the webcam. Please enable camera permissions or try restarting your browser.")
+    st.stop()
+
+# Main Loop for Real-Time Transformation
+while True:
+    ret, frame = cap.read()
+    if not ret:
+        st.warning("⚠️ No frame captured. Check your camera settings.")
+        break
+
+    frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)  # OpenCV uses BGR by default
+    input_image = Image.fromarray(frame)
+    processed_image = preprocess_frame(input_image)
+
+    # Apply Model Transformation
     with torch.no_grad():
-        output = generator(img)
-    output = output.squeeze().cpu().numpy().transpose(1, 2, 0)
-    output = (output + 1) / 2  # Denormalize
-    output = (output * 255).astype(np.uint8)
-    return output
+        generator = generator_g if transform_type == "Day to Night" else generator_f
+        transformed_tensor = generator(processed_image)
 
-# WebRTC video processing
-class VideoTransformer(VideoTransformerBase):
-    def transform(self, frame):
-        img = frame.to_ndarray(format="bgr24")
-        img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        transformed = transform_frame(img_rgb)
-        h, w, _ = img.shape
-        transformed = cv2.resize(transformed, (w, h))
-        stacked_frame = np.hstack((img_rgb, transformed))
-        return cv2.cvtColor(stacked_frame, cv2.COLOR_RGB2BGR)
+    transformed_frame = postprocess_frame(transformed_tensor)
 
-# Streamlit UI
-st.title("Live Video Transformation using CycleGAN")
-st.sidebar.header("Settings")
-st.write("### Original (Left) | Transformed (Right)")
+    # Display Output Frame
+    FRAME_WINDOW.image(transformed_frame, use_column_width=True)
 
-# WebRTC Streaming
-webrtc_streamer(
-    key="video",
-    video_processor_factory=VideoTransformer,
-    async_processing=True
-)
+# Release Camera on Exit
+cap.release()
+st.write("🔴 Webcam feed stopped.")
