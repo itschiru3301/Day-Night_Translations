@@ -1,26 +1,39 @@
-import streamlit as st
+# app.py
+import asyncio
+import sys
+
+# Event loop fix must be FIRST
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
+def get_or_create_eventloop():
+    try:
+        return asyncio.get_event_loop()
+    except RuntimeError as ex:
+        if "no current event loop" in str(ex):
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            return asyncio.get_event_loop()
+            
+get_or_create_eventloop()
+
+# Torch classes workaround BEFORE other imports
 import torch
-import cv2
+torch.classes.__path__ = []  # Explicit empty path
+
+# Now other imports
+import streamlit as st
+import torch.nn as nn
 import numpy as np
 from PIL import Image
 from torchvision import transforms
-from torch import nn
+import av
+from streamlit_webrtc import webrtc_streamer
 
-# Streamlit App Title
-st.title("🌙 CycleGAN Real-Time Video Transformation")
-st.markdown("Convert day-to-night or night-to-day in real-time using your webcam! 🚀")
-
-# Sidebar Settings
-st.sidebar.header("Settings")
-transform_type = st.sidebar.radio("Select Transformation", ("Day to Night", "Night to Day"))
-
-# Device Configuration
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-# Model Definition (Must Match Training)
+# Generator definition
 class Generator(nn.Module):
     def __init__(self):
-        super(Generator, self).__init__()
+        super().__init__()
         self.main = nn.Sequential(
             nn.Conv2d(3, 64, kernel_size=4, stride=2, padding=1),
             nn.ReLU(True),
@@ -35,69 +48,54 @@ class Generator(nn.Module):
     def forward(self, x):
         return self.main(x)
 
-# Load Model with Caching
 @st.cache_resource
-def load_generator(model_path):
-    model = Generator().to(DEVICE)
-    model.load_state_dict(torch.load(model_path, map_location=DEVICE))
+def load_model(model_path):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = Generator().to(device)
+    model.load_state_dict(torch.load(model_path, map_location=device))
     model.eval()
     return model
 
-# Ensure model files exist before loading
-try:
-    generator_g = load_generator("generator_g.pth")  # Day to Night
-    generator_f = load_generator("generator_f.pth")  # Night to Day
-except Exception as e:
-    st.error(f"Error loading models: {e}")
-    st.stop()
-
-# Image Processing Functions
-transform = transforms.Compose([
-    transforms.Resize((256, 256)),
-    transforms.ToTensor(),
-    transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
-])
-
-def preprocess_frame(image):
-    """Convert image to model-compatible tensor."""
-    return transform(image).unsqueeze(0).to(DEVICE)
-
-def postprocess_frame(tensor):
-    """Convert model output tensor back to image."""
-    tensor = tensor.squeeze(0).detach().cpu().numpy()
-    tensor = (tensor * 0.5 + 0.5) * 255  # Reverse normalization
-    tensor = np.clip(tensor, 0, 255).astype(np.uint8)
-    return Image.fromarray(np.transpose(tensor, (1, 2, 0)))
-
-# Webcam Setup
-FRAME_WINDOW = st.image([])
-cap = cv2.VideoCapture(0)
-
-if not cap.isOpened():
-    st.error("⚠️ Cannot access the webcam. Please enable camera permissions or try restarting your browser.")
-    st.stop()
-
-# Main Loop for Real-Time Transformation
-while True:
-    ret, frame = cap.read()
-    if not ret:
-        st.warning("⚠️ No frame captured. Check your camera settings.")
-        break
-
-    frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)  # OpenCV uses BGR by default
-    input_image = Image.fromarray(frame)
-    processed_image = preprocess_frame(input_image)
-
-    # Apply Model Transformation
+def process_frame(frame: av.VideoFrame, model) -> av.VideoFrame:
+    image = frame.to_ndarray(format="bgr24")
+    pil_img = Image.fromarray(image[..., ::-1])  # BGR to RGB
+    
+    transform = transforms.Compose([
+        transforms.Resize((256, 256)),
+        transforms.ToTensor(),
+        transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
+    ])
+    
     with torch.no_grad():
-        generator = generator_g if transform_type == "Day to Night" else generator_f
-        transformed_tensor = generator(processed_image)
+        tensor = transform(pil_img).unsqueeze(0).to(next(model.parameters()).device)
+        output = model(tensor)[0].cpu().numpy()
+    
+    output = (np.transpose(output, (1, 2, 0)) * 0.5 + 0.5) * 255
+    return av.VideoFrame.from_ndarray(output[..., ::-1].astype(np.uint8), format="bgr24")
 
-    transformed_frame = postprocess_frame(transformed_tensor)
+def main():
+    st.title("Real-Time Day/Night Converter")
+    
+    # Model selection
+    mode = st.radio("Conversion Mode:", 
+                   ("Day → Night", "Night → Day"),
+                   horizontal=True)
+    
+    # Load model
+    model = load_model("generator_g.pth" if mode == "Day → Night" else "generator_f.pth")
+    
+    # WebRTC component
+    webrtc_ctx = webrtc_streamer(
+        key="cyclegan",
+        video_frame_callback=lambda frame: process_frame(frame, model),
+        media_stream_constraints={"video": True, "audio": False},
+        rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]},
+        async_processing=True
+    )
+    
+    if not webrtc_ctx.state.playing:
+        st.info("Waiting for camera access...")
+        st.warning("Please enable camera permissions")
 
-    # Display Output Frame
-    FRAME_WINDOW.image(transformed_frame, use_column_width=True)
-
-# Release Camera on Exit
-cap.release()
-st.write("🔴 Webcam feed stopped.")
+if __name__ == "__main__":
+    main()

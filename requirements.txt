@@ -1,6 +1,7 @@
-torch
-torchvision
-streamlit
-numpy
-Pillow
-opencv-python-headless
+streamlit==1.33.0
+streamlit-webrtc==0.47.1
+torch==2.0.1
+torchvision==0.15.2
+numpy==1.24.3
+pillow==10.0.0
+av==10.0.0
